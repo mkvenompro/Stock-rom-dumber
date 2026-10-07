@@ -7,92 +7,174 @@ on:
         description: "Direct ROM URL (used exactly as entered)"
         required: true
         type: string
+
       target_branch:
         description: "Branch to push files (auto = generate from dump info)"
         required: false
         default: "auto"
         type: string
+
       device_name:
         description: "Device codename fallback"
         required: false
         default: "unknown"
         type: string
+
       extract_contents:
         description: "Try extracting filesystem contents from images"
         required: false
         default: "true"
         type: choice
-        options: ["true", "false"]
+        options:
+          - "true"
+          - "false"
+
       compress_images:
         description: "Compress .img to .img.xz before push"
         required: false
         default: "false"
         type: choice
-        options: ["false", "true"]
+        options:
+          - "false"
+          - "true"
+
       upload_github_branch:
         description: "Upload to this repo smart branch"
         required: false
         default: "true"
         type: choice
-        options: ["true", "false"]
+        options:
+          - "true"
+          - "false"
+
       upload_gitlab:
         description: "Upload to GitLab"
         required: false
         default: "false"
         type: choice
-        options: ["false", "true"]
+        options:
+          - "false"
+          - "true"
+
       upload_gitea:
         description: "Upload to Gitea/Codeberg"
         required: false
         default: "false"
         type: choice
-        options: ["false", "true"]
+        options:
+          - "false"
+          - "true"
+
       upload_sourceforge:
         description: "Upload to SourceForge"
         required: false
         default: "false"
         type: choice
-        options: ["false", "true"]
+        options:
+          - "false"
+          - "true"
+
       upload_r2:
         description: "Upload to Cloudflare R2"
         required: false
         default: "false"
         type: choice
-        options: ["false", "true"]
+        options:
+          - "false"
+          - "true"
+
 
 jobs:
   dump-rom:
+
     runs-on: ubuntu-latest
+
     concurrency:
       group: dumprx-${{ github.event.inputs.rom_url }}
       cancel-in-progress: false
+
     permissions:
       contents: write
 
     steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+
+      # ============================================================
+      # FREE DISK
+      # ============================================================
+
       - name: Free disk
         run: |
           set -e
+
+          echo "=== Disk before cleanup ==="
           df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/.ghcup "$AGENT_TOOLSDIRECTORY"
+
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/share/swift \
+            /usr/local/.ghcup \
+            "$AGENT_TOOLSDIRECTORY" \
+            2>/dev/null || true
+
           sudo apt-get clean -qq || true
-          sudo docker image prune --all --force 2>/dev/null || true
+
+          sudo docker image prune \
+            --all \
+            --force \
+            2>/dev/null || true
+
+          echo "=== Disk after cleanup ==="
           df -h /
+
+
+      # ============================================================
+      # DEPENDENCIES
+      # ============================================================
 
       - name: Install dependencies
         run: |
           set -e
+
           sudo apt-get update -qq
+
           sudo apt-get install -y --no-install-recommends \
-            git git-lfs curl jq file rsync unzip tar zip \
-            python3 python3-pip xz-utils p7zip-full sharutils cabextract \
-            brotli liblz4-tool gawk detox cpio rename \
-            device-tree-compiler e2fsprogs openssh-client
+            git \
+            git-lfs \
+            curl \
+            jq \
+            file \
+            rsync \
+            unzip \
+            tar \
+            zip \
+            python3 \
+            python3-pip \
+            xz-utils \
+            p7zip-full \
+            sharutils \
+            cabextract \
+            brotli \
+            liblz4-tool \
+            gawk \
+            detox \
+            cpio \
+            rename \
+            device-tree-compiler \
+            e2fsprogs \
+            openssh-client
 
           optional_pkgs=(
             unrar
@@ -103,52 +185,114 @@ jobs:
 
           for pkg in "${optional_pkgs[@]}"; do
             if apt-cache show "$pkg" >/dev/null 2>&1; then
-              sudo apt-get install -y --no-install-recommends "$pkg" || true
+              sudo apt-get install \
+                -y \
+                --no-install-recommends \
+                "$pkg" || true
             else
-              echo "Optional package not available on this runner: $pkg"
+              echo "Optional package not available: $pkg"
             fi
           done
+
+          git lfs install --system || true
+
+
+      # ============================================================
+      # VALIDATE URL
+      # ============================================================
 
       - name: Validate URL
         id: input
         run: |
           set -e
+
           URL='${{ inputs.rom_url }}'
-          [ -n "$URL" ] || { echo "ERROR: rom_url is empty"; exit 1; }
-          echo "$URL" | grep -qE '^https?://' || { echo "ERROR: rom_url must start with http/https"; exit 1; }
+
+          if [ -z "$URL" ]; then
+            echo "ERROR: rom_url is empty"
+            exit 1
+          fi
+
+          echo "$URL" | grep -qE '^https?://' || {
+            echo "ERROR: rom_url must start with http:// or https://"
+            exit 1
+          }
+
           echo "rom_url=$URL" >> "$GITHUB_OUTPUT"
-          echo "Using URL exactly: $URL"
+
+          echo "Using URL exactly:"
+          echo "$URL"
+
+
+      # ============================================================
+      # CLONE DUMPRX
+      # ============================================================
 
       - name: Clone DumprX
         run: |
           set -e
+
           rm -rf /tmp/DumprX
-          git clone --depth=1 https://github.com/DumprX/DumprX.git /tmp/DumprX
+
+          git clone \
+            --depth=1 \
+            https://github.com/DumprX/DumprX.git \
+            /tmp/DumprX
+
+
+      # ============================================================
+      # RUN DUMPRX
+      # ============================================================
 
       - name: Run DumprX with exact URL
         run: |
           set +e
+
           cd /tmp/DumprX
+
           chmod +x dumper.sh setup.sh
+
           export TERM=xterm
 
           ./dumper.sh '${{ steps.input.outputs.rom_url }}'
+
           code=$?
+
           if [ "$code" -ne 0 ]; then
-            if [ -d /tmp/DumprX/out ] && [ -n "$(find /tmp/DumprX/out -type f | head -n1)" ]; then
-              echo "DumprX returned non-zero but output exists. Continuing."
+
+            if [ -d /tmp/DumprX/out ] && \
+               [ -n "$(find /tmp/DumprX/out -type f | head -n1)" ]; then
+
+              echo "DumprX returned non-zero but output exists."
+              echo "Continuing."
+
             else
-              echo "DumprX failed and no output found."
+
+              echo "DumprX failed and no output was found."
               exit "$code"
+
             fi
           fi
+
+
+      # ============================================================
+      # COLLECT OUTPUT
+      # ============================================================
 
       - name: Collect output
         run: |
           set -e
+
           mkdir -p /tmp/final_dump
-          [ -d /tmp/DumprX/out ] || { echo "ERROR: /tmp/DumprX/out missing"; exit 1; }
-          rsync -a /tmp/DumprX/out/ /tmp/final_dump/
+
+          if [ ! -d /tmp/DumprX/out ]; then
+            echo "ERROR: /tmp/DumprX/out missing"
+            exit 1
+          fi
+
+          rsync -a \
+            /tmp/DumprX/out/ \
+            /tmp/final_dump/
 
           {
             echo "rom_url=${{ steps.input.outputs.rom_url }}"
@@ -158,138 +302,334 @@ jobs:
             echo "dumped_at=$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           } > /tmp/final_dump/_dump_info.txt
 
+
+      # ============================================================
+      # RESOLVE TARGET BRANCH
+      # ============================================================
+
       - name: Resolve target branch
         id: branch
         run: |
           set -e
+
           sanitize() {
-            echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^-+//; s/-+$//'
+            echo "$1" |
+              tr '[:upper:]' '[:lower:]' |
+              sed -E \
+                's/[^a-z0-9._-]+/-/g;
+                 s/-+/-/g;
+                 s/^-+//;
+                 s/-+$//'
           }
 
           input='${{ inputs.target_branch }}'
+
           if [ -n "$input" ] && [ "$input" != "auto" ]; then
+
             out=$(sanitize "$input")
+
           else
+
             readme=/tmp/final_dump/README.md
-            brand=$(awk -F': ' '/^- Brand:/{print $2; exit}' "$readme" 2>/dev/null || true)
-            code=$(awk -F': ' '/^- Codename:/{print $2; exit}' "$readme" 2>/dev/null || true)
-            incr=$(awk -F': ' '/^- Incremental:/{print $2; exit}' "$readme" 2>/dev/null || true)
+
+            brand=$(awk -F': ' \
+              '/^- Brand:/{print $2; exit}' \
+              "$readme" 2>/dev/null || true)
+
+            code=$(awk -F': ' \
+              '/^- Codename:/{print $2; exit}' \
+              "$readme" 2>/dev/null || true)
+
+            incr=$(awk -F': ' \
+              '/^- Incremental:/{print $2; exit}' \
+              "$readme" 2>/dev/null || true)
+
             [ -n "$brand" ] || brand=stock
             [ -n "$code" ] || code='${{ inputs.device_name }}'
+
             out=$(sanitize "dump-$brand-$code-$incr")
+
           fi
 
-          [ -n "$out" ] || out="dumps-$(date +%Y%m%d-%H%M%S)"
-          [ "$out" != "main" ] || out="dumps-$(date +%Y%m%d-%H%M%S)"
+          [ -n "$out" ] || \
+            out="dumps-$(date +%Y%m%d-%H%M%S)"
+
+          [ "$out" != "main" ] || \
+            out="dumps-$(date +%Y%m%d-%H%M%S)"
 
           echo "target_branch=$out" >> "$GITHUB_OUTPUT"
-          echo "target_branch_resolved=$out" >> /tmp/final_dump/_dump_info.txt
+
+          echo "target_branch_resolved=$out" \
+            >> /tmp/final_dump/_dump_info.txt
+
           echo "Resolved branch: $out"
+
+
+      # ============================================================
+      # RECOVERY FALLBACK
+      # ============================================================
 
       - name: Recovery fallback from vendor_boot
         run: |
           set -e
-          if ! find /tmp/final_dump -type f -iname 'recovery.img' | grep -q .; then
-            vb=$(find /tmp/final_dump -type f -iname 'vendor_boot*.img' | head -n1 || true)
+
+          if ! find /tmp/final_dump \
+              -type f \
+              -iname 'recovery.img' |
+              grep -q .; then
+
+            vb=$(find /tmp/final_dump \
+              -type f \
+              -iname 'vendor_boot*.img' |
+              head -n1 || true)
+
             if [ -n "$vb" ] && [ -f "$vb" ]; then
-              cp "$vb" /tmp/final_dump/recovery_from_vendor_boot.img
-              echo "recovery_fallback=vendor_boot" >> /tmp/final_dump/_dump_info.txt
-              echo "recovery_source_file=$(basename "$vb")" >> /tmp/final_dump/_dump_info.txt
+
+              cp "$vb" \
+                /tmp/final_dump/recovery_from_vendor_boot.img
+
+              echo "recovery_fallback=vendor_boot" \
+                >> /tmp/final_dump/_dump_info.txt
+
+              echo "recovery_source_file=$(basename "$vb")" \
+                >> /tmp/final_dump/_dump_info.txt
+
             fi
           fi
+
+
+      # ============================================================
+      # OPTIONAL COMPRESSION
+      # ============================================================
 
       - name: Optional compress images
         if: inputs.compress_images == 'true'
         run: |
           set -e
-          find /tmp/final_dump -type f -name '*.img' -print0 | while IFS= read -r -d '' img; do
+
+          find /tmp/final_dump \
+            -type f \
+            -name '*.img' \
+            -print0 |
+          while IFS= read -r -d '' img; do
+
+            echo "Compressing: $img"
+
             xz -T0 -6 "$img"
+
           done
+
+
+      # ============================================================
+      # OPTIONAL EXTRACTION
+      # ============================================================
 
       - name: Optional extract image contents
         if: inputs.extract_contents == 'true'
         run: |
           set -e
+
           mkdir -p /tmp/final_dump/extracted
-          find /tmp/final_dump -maxdepth 2 -type f -name '*.img' -print0 | while IFS= read -r -d '' img; do
+
+          find /tmp/final_dump \
+            -maxdepth 2 \
+            -type f \
+            -name '*.img' \
+            -print0 |
+          while IFS= read -r -d '' img; do
+
             name=$(basename "$img" .img)
-            out=/tmp/final_dump/extracted/$name
+
+            out="/tmp/final_dump/extracted/$name"
+
             mkdir -p "$out"
 
             if command -v debugfs >/dev/null 2>&1; then
-              if debugfs -R "rdump / $out" "$img" >/dev/null 2>&1; then
+
+              if debugfs \
+                -R "rdump / $out" \
+                "$img" >/dev/null 2>&1; then
+
+                echo "Extracted: $img"
+
                 continue
+
               fi
+
             fi
+
           done || true
+
+
+      # ============================================================
+      # GITHUB BRANCH UPLOAD
+      # ============================================================
 
       - name: Push to target branch (smart)
         if: inputs.upload_github_branch == 'true'
         run: |
           set -e
+
           BRANCH="${{ steps.branch.outputs.target_branch }}"
 
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config \
+            --global \
+            user.name \
+            "github-actions[bot]"
 
-          find /tmp/final_dump -type f -name '*.apk' -size +100M -delete 2>/dev/null || true
+          git config \
+            --global \
+            user.email \
+            "github-actions[bot]@users.noreply.github.com"
+
+          find /tmp/final_dump \
+            -type f \
+            -name '*.apk' \
+            -size +100M \
+            -delete 2>/dev/null || true
+
           git lfs install --skip-smudge || true
 
           REMOTE_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
 
-          if git ls-remote --exit-code --heads "$REMOTE_URL" "$BRANCH" >/dev/null 2>&1; then
+          if git ls-remote \
+              --exit-code \
+              --heads \
+              "$REMOTE_URL" \
+              "$BRANCH" >/dev/null 2>&1; then
+
             git fetch origin "$BRANCH" --depth=1
+
             git checkout "$BRANCH"
+
           else
+
             git checkout --orphan "$BRANCH"
-            git rm -rf . --quiet 2>/dev/null || true
+
+            git rm -rf . \
+              --quiet \
+              2>/dev/null || true
+
           fi
 
-          rsync -a --exclude='.git' /tmp/final_dump/ ./
-          find . -not -path './.git/*' -type f | sort > file_list.txt
-          find . -not -path './.git/*' -type f -exec sha256sum {} \; > checksums.sha256
+          rsync -a \
+            --exclude='.git' \
+            /tmp/final_dump/ \
+            ./
+
+          find . \
+            -not -path './.git/*' \
+            -type f |
+            sort > file_list.txt
+
+          find . \
+            -not -path './.git/*' \
+            -type f \
+            -exec sha256sum {} \; \
+            > checksums.sha256
 
           git add -A
+
           if git diff --cached --quiet; then
+
             echo "Nothing to commit."
+
           else
-            git commit -m "dump: $BRANCH [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+
+            git commit \
+              -m "dump: $BRANCH [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+
             ok=false
+
             for i in 1 2 3; do
+
               if git push "$REMOTE_URL" "$BRANCH"; then
+
                 ok=true
+
                 break
+
               fi
-              echo "GitHub push attempt $i failed, retrying..."
+
+              echo "GitHub push attempt $i failed."
+
               sleep 5
+
             done
-            [ "$ok" = true ] || { echo "ERROR: GitHub upload failed after retries"; exit 1; }
+
+            if [ "$ok" != "true" ]; then
+              echo "ERROR: GitHub upload failed."
+              exit 1
+            fi
+
           fi
+
 
       - name: GitHub upload disabled
         if: inputs.upload_github_branch != 'true'
-        run: echo "GitHub branch upload is disabled. Skipping."
+        run: |
+          echo "GitHub branch upload disabled."
+
+
+      # ============================================================
+      # RESOLVE GITLAB REPOSITORY
+      # ============================================================
 
       - name: Resolve GitLab repo name
         id: gitlab_repo
         if: inputs.upload_gitlab == 'true'
         run: |
           set -e
+
           sanitize() {
-            echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^-+//; s/-+$//'
+            echo "$1" |
+              tr '[:upper:]' '[:lower:]' |
+              sed -E \
+                's/[^a-z0-9._-]+/-/g;
+                 s/-+/-/g;
+                 s/^-+//;
+                 s/-+$//'
           }
 
           readme=/tmp/final_dump/README.md
-          brand=$(awk -F': ' '/^- Brand:/{print $2; exit}' "$readme" 2>/dev/null || true)
-          code=$(awk -F': ' '/^- Codename:/{print $2; exit}' "$readme" 2>/dev/null || true)
+
+          brand=$(awk -F': ' \
+            '/^- Brand:/{print $2; exit}' \
+            "$readme" 2>/dev/null || true)
+
+          code=$(awk -F': ' \
+            '/^- Codename:/{print $2; exit}' \
+            "$readme" 2>/dev/null || true)
+
           [ -n "$brand" ] || brand=stock
           [ -n "$code" ] || code='${{ inputs.device_name }}'
 
           repo_name=$(sanitize "dump-$brand-$code")
-          [ -n "$repo_name" ] || repo_name="dump-unknown-$(date +%Y%m%d-%H%M%S)"
+
+          [ -n "$repo_name" ] || \
+            repo_name="dump-unknown-$(date +%Y%m%d-%H%M%S)"
 
           echo "repo_name=$repo_name" >> "$GITHUB_OUTPUT"
+
           echo "Resolved GitLab repo name: $repo_name"
+
+
+      # ============================================================
+      # GITLAB UPLOAD
+      #
+      # IMPORTANT:
+      # This version does NOT use:
+      #
+      # /projects/<encoded namespace/project>
+      #
+      # That endpoint was returning HTTP 301.
+      #
+      # Instead:
+      #
+      # /projects?search=...
+      #
+      # Then it matches path_with_namespace exactly.
+      # ============================================================
 
       - name: Mirror to GitLab
         if: inputs.upload_gitlab == 'true'
@@ -299,195 +639,650 @@ jobs:
           set -e
 
           GL_TOKEN="${GITLAB_TOKEN:-}"
+
           REPO_NAME="${{ steps.gitlab_repo.outputs.repo_name }}"
+
           BRANCH="${{ steps.branch.outputs.target_branch }}"
 
-          [ -n "$GL_TOKEN" ] || { echo "ERROR: Missing secret GITLAB_TOKEN"; exit 1; }
+          if [ -z "$GL_TOKEN" ]; then
+
+            echo "ERROR: Missing GITLAB_TOKEN secret."
+
+            exit 1
+
+          fi
 
           API="https://gitlab.com/api/v4"
 
-          # Resolve the real username tied to this token instead of trusting a
-          # secret that could drift out of sync with it — this guarantees the
-          # existence check below and the actual project creation always land
-          # on the exact same namespace path.
-          ME_CODE=$(curl -s -o /tmp/gl_me.json -w "%{http_code}" \
+
+          # ========================================================
+          # GET USERNAME FROM TOKEN
+          # ========================================================
+
+          ME_CODE=$(curl \
+            -sS \
+            -o /tmp/gl_me.json \
+            -w "%{http_code}" \
             --header "PRIVATE-TOKEN: $GL_TOKEN" \
             "$API/user")
+
           if [ "$ME_CODE" != "200" ]; then
-            echo "ERROR: Could not resolve GitLab identity for this token (HTTP $ME_CODE)."
+
+            echo "ERROR: Could not resolve GitLab identity."
+
+            echo "HTTP: $ME_CODE"
+
             cat /tmp/gl_me.json
+
             exit 1
+
           fi
-          GL_USER=$(jq -r '.username' /tmp/gl_me.json)
-          [ -n "$GL_USER" ] && [ "$GL_USER" != "null" ] || { echo "ERROR: Could not parse GitLab username from token."; exit 1; }
-          echo "Resolved GitLab username from token: $GL_USER"
 
-          # Look up the project by path (namespace/repo). 404 = doesn't exist yet.
-          PROJECT_PATH_ENC=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$GL_USER/$REPO_NAME")
+          GL_USER=$(jq -r \
+            '.username // empty' \
+            /tmp/gl_me.json)
 
-          HTTP_CODE=$(curl -s -o /tmp/gl_project.json -w "%{http_code}" \
+          if [ -z "$GL_USER" ]; then
+
+            echo "ERROR: Could not parse GitLab username."
+
+            exit 1
+
+          fi
+
+          echo "Resolved GitLab username: $GL_USER"
+
+
+          # ========================================================
+          # SEARCH PROJECT
+          #
+          # FIX FOR HTTP 301
+          # ========================================================
+
+          EXPECTED_PATH="$GL_USER/$REPO_NAME"
+
+          SEARCH_ENC=$(python3 -c \
+            "import urllib.parse; print(urllib.parse.quote('''$REPO_NAME''', safe=''))")
+
+          echo "Searching GitLab project:"
+          echo "$EXPECTED_PATH"
+
+          SEARCH_CODE=$(curl \
+            -sS \
+            -o /tmp/gl_projects.json \
+            -w "%{http_code}" \
             --header "PRIVATE-TOKEN: $GL_TOKEN" \
-            "$API/projects/$PROJECT_PATH_ENC")
+            "$API/projects?search=$SEARCH_ENC&owned=true&per_page=100")
 
-          if [ "$HTTP_CODE" = "200" ]; then
-            echo "GitLab repo already exists: $GL_USER/$REPO_NAME"
-          elif [ "$HTTP_CODE" = "404" ]; then
-            echo "GitLab repo not found — creating it: $REPO_NAME"
-            CREATE_CODE=$(curl -s -o /tmp/gl_create.json -w "%{http_code}" \
+          if [ "$SEARCH_CODE" != "200" ]; then
+
+            echo "ERROR: GitLab project search failed."
+
+            echo "HTTP: $SEARCH_CODE"
+
+            cat /tmp/gl_projects.json
+
+            exit 1
+
+          fi
+
+
+          PROJECT_ID=$(jq -r \
+            --arg expected "$EXPECTED_PATH" \
+            '.[] |
+             select(.path_with_namespace == $expected) |
+             .id' \
+            /tmp/gl_projects.json |
+            head -n1)
+
+
+          PROJECT_URL=$(jq -r \
+            --arg expected "$EXPECTED_PATH" \
+            '.[] |
+             select(.path_with_namespace == $expected) |
+             .http_url_to_repo' \
+            /tmp/gl_projects.json |
+            head -n1)
+
+
+          # ========================================================
+          # CREATE IF MISSING
+          # ========================================================
+
+          if [ -z "$PROJECT_ID" ] || \
+             [ "$PROJECT_ID" = "null" ]; then
+
+            echo "GitLab project does not exist."
+
+            echo "Creating: $EXPECTED_PATH"
+
+            CREATE_JSON=$(jq -n \
+              --arg name "$REPO_NAME" \
+              --arg path "$REPO_NAME" \
+              '{
+                name: $name,
+                path: $path,
+                visibility: "public",
+                initialize_with_readme: false
+              }')
+
+            CREATE_CODE=$(curl \
+              -sS \
+              -o /tmp/gl_create.json \
+              -w "%{http_code}" \
+              --request POST \
               --header "PRIVATE-TOKEN: $GL_TOKEN" \
               --header "Content-Type: application/json" \
-              --data "{\"name\": \"$REPO_NAME\", \"path\": \"$REPO_NAME\", \"visibility\": \"public\", \"initialize_with_readme\": false}" \
+              --data "$CREATE_JSON" \
               "$API/projects")
-            if [ "$CREATE_CODE" = "400" ] && grep -q "has already been taken" /tmp/gl_create.json; then
-              # Race/drift: it exists after all (e.g. created moments ago by a
-              # concurrent run) — treat it as found rather than failing.
-              echo "GitLab repo already existed (creation reported 'already taken') — continuing."
-            elif [ "$CREATE_CODE" != "201" ]; then
-              echo "ERROR: Failed to create GitLab repo (HTTP $CREATE_CODE). Token needs 'api' scope."
-              cat /tmp/gl_create.json
-              exit 1
+
+
+            if [ "$CREATE_CODE" = "201" ]; then
+
+              PROJECT_ID=$(jq -r \
+                '.id // empty' \
+                /tmp/gl_create.json)
+
+              PROJECT_URL=$(jq -r \
+                '.http_url_to_repo // empty' \
+                /tmp/gl_create.json)
+
+              echo "GitLab project created."
+              echo "Project ID: $PROJECT_ID"
+
+
+            elif [ "$CREATE_CODE" = "400" ] && \
+                 grep -qi \
+                 "has already been taken" \
+                 /tmp/gl_create.json; then
+
+              echo "Project already exists."
+
+              sleep 3
+
+              SEARCH_CODE=$(curl \
+                -sS \
+                -o /tmp/gl_projects_retry.json \
+                -w "%{http_code}" \
+                --header "PRIVATE-TOKEN: $GL_TOKEN" \
+                "$API/projects?search=$SEARCH_ENC&owned=true&per_page=100")
+
+              if [ "$SEARCH_CODE" != "200" ]; then
+
+                echo "ERROR: GitLab re-search failed."
+
+                cat /tmp/gl_projects_retry.json
+
+                exit 1
+
+              fi
+
+              PROJECT_ID=$(jq -r \
+                --arg expected "$EXPECTED_PATH" \
+                '.[] |
+                 select(.path_with_namespace == $expected) |
+                 .id' \
+                /tmp/gl_projects_retry.json |
+                head -n1)
+
+              PROJECT_URL=$(jq -r \
+                --arg expected "$EXPECTED_PATH" \
+                '.[] |
+                 select(.path_with_namespace == $expected) |
+                 .http_url_to_repo' \
+                /tmp/gl_projects_retry.json |
+                head -n1)
+
             else
-              echo "Created GitLab repo: $GL_USER/$REPO_NAME"
-              sleep 5
+
+              echo "ERROR: GitLab project creation failed."
+
+              echo "HTTP: $CREATE_CODE"
+
+              cat /tmp/gl_create.json
+
+              echo ""
+              echo "Your GitLab token needs API permission."
+
+              exit 1
+
             fi
+
           else
-            echo "ERROR: Unexpected response checking GitLab repo (HTTP $HTTP_CODE)"
-            cat /tmp/gl_project.json
-            exit 1
+
+            echo "GitLab project already exists."
+
+            echo "Project ID: $PROJECT_ID"
+
           fi
 
-          REPO_URL="https://gitlab.com/${GL_USER}/${REPO_NAME}.git"
-          AUTH_REMOTE="${REPO_URL/https:\/\//https:\/\/oauth2:${GL_TOKEN}@}"
 
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          # ========================================================
+          # FINAL VALIDATION
+          # ========================================================
+
+          if [ -z "$PROJECT_ID" ] || \
+             [ "$PROJECT_ID" = "null" ]; then
+
+            echo "ERROR: GitLab PROJECT_ID is empty."
+
+            exit 1
+
+          fi
+
+          if [ -z "$PROJECT_URL" ] || \
+             [ "$PROJECT_URL" = "null" ]; then
+
+            PROJECT_URL="https://gitlab.com/$EXPECTED_PATH.git"
+
+          fi
+
+          echo "GitLab Project ID: $PROJECT_ID"
+
+          echo "GitLab Repository:"
+          echo "$PROJECT_URL"
+
+
+          # ========================================================
+          # PREPARE GITLAB PUSH
+          # ========================================================
+
+          git config \
+            --global \
+            user.name \
+            "github-actions[bot]"
+
+          git config \
+            --global \
+            user.email \
+            "github-actions[bot]@users.noreply.github.com"
+
 
           rm -rf /tmp/gitlab_push
+
           mkdir -p /tmp/gitlab_push
-          SOURCE_COUNT=$(find /tmp/final_dump -type f | wc -l)
-          echo "Files in source dump (/tmp/final_dump): $SOURCE_COUNT"
+
+          SOURCE_COUNT=$(find \
+            /tmp/final_dump \
+            -type f |
+            wc -l)
+
+          echo "Source files: $SOURCE_COUNT"
+
           df -h /tmp
 
-          # cp -al hard-links files instead of duplicating their data blocks,
-          # so we don't need double the disk space just to stage the copy.
-          # Falls back to rsync only if hard-linking isn't possible (e.g. cross-device).
-          if ! cp -al /tmp/final_dump/. /tmp/gitlab_push/ 2>/tmp/cp_err.log; then
-            echo "cp -al failed, falling back to rsync (uses more disk):"
+
+          if ! cp -al \
+              /tmp/final_dump/. \
+              /tmp/gitlab_push/ \
+              2>/tmp/cp_err.log; then
+
+            echo "Hard-link copy failed."
+
             cat /tmp/cp_err.log
-            rsync -a /tmp/final_dump/ /tmp/gitlab_push/
+
+            echo "Using rsync."
+
+            rsync -a \
+              /tmp/final_dump/ \
+              /tmp/gitlab_push/
+
           fi
+
           cd /tmp/gitlab_push
 
+
           COPIED_COUNT=$(find . -type f | wc -l)
-          echo "Files copied into /tmp/gitlab_push: $COPIED_COUNT"
+
+          echo "Copied files: $COPIED_COUNT"
+
           if [ "$COPIED_COUNT" -ne "$SOURCE_COUNT" ]; then
-            echo "ERROR: Copy is incomplete ($COPIED_COUNT/$SOURCE_COUNT files) — likely ran out of disk space."
+
+            echo "ERROR: Incomplete copy."
+
             df -h /tmp
+
             exit 1
+
           fi
+
+
+          # ========================================================
+          # AUTHENTICATED REMOTE
+          # ========================================================
+
+          AUTH_REMOTE="https://oauth2:${GL_TOKEN}@gitlab.com/${EXPECTED_PATH}.git"
 
           git init
+
           git remote add origin "$AUTH_REMOTE"
 
-          # Validate auth and repository path before committing big data.
-          # A freshly created GitLab project can take a few seconds for its
-          # git backend (Gitaly) to become reachable, so retry with backoff
-          # instead of failing on the first attempt.
+
+          # ========================================================
+          # TEST GIT ACCESS
+          # ========================================================
+
           LS_OK=false
+
           for i in 1 2 3 4 5; do
+
             if git ls-remote origin >/dev/null 2>&1; then
+
               LS_OK=true
+
+              echo "GitLab Git access OK."
+
               break
+
             fi
-            echo "git ls-remote attempt $i failed, retrying in $((i * 3))s..."
+
+            echo "GitLab access attempt $i failed."
+
             sleep $((i * 3))
+
           done
+
+
           if [ "$LS_OK" != "true" ]; then
-            echo "ERROR: GitLab auth/repo check failed after creation (403/404 غالبا token scope غلط أو الريبو لسه بيتجهز)."
-            echo "Expected repo URL: $REPO_URL"
-            echo "Required token scope: api"
+
+            echo "ERROR: GitLab authentication/repository access failed."
+
+            echo "Expected:"
+            echo "https://gitlab.com/$EXPECTED_PATH"
+
             exit 1
+
           fi
 
-          find . -type f -name '*.apk' -size +100M -delete 2>/dev/null || true
 
-          git config http.postBuffer 524288000
-          git config http.lowSpeedLimit 1000
-          git config http.lowSpeedTime 600
+          # ========================================================
+          # REMOVE HUGE APK
+          # ========================================================
 
-          # Resume support: if this branch already has commits on GitLab (from a
-          # previous run that got cut off), build on top of that history without
-          # touching the working directory (avoids conflicts when re-extracted
-          # files differ slightly byte-for-byte, e.g. APK/JAR timestamps).
+          find . \
+            -type f \
+            -name '*.apk' \
+            -size +100M \
+            -delete 2>/dev/null || true
+
+
+          git config \
+            http.postBuffer \
+            524288000
+
+          git config \
+            http.lowSpeedLimit \
+            1000
+
+          git config \
+            http.lowSpeedTime \
+            600
+
+
+          # ========================================================
+          # BRANCH
+          # ========================================================
+
           git checkout -B "$BRANCH"
+
           : > /tmp/gitlab_remote_sizes.txt
-          if git fetch --depth=1 origin "$BRANCH" 2>/tmp/gitlab_fetch.log; then
-            echo "Existing branch found on GitLab — resuming on top of it."
+
+
+          # ========================================================
+          # RESUME EXISTING BRANCH
+          # ========================================================
+
+          if git fetch \
+              --depth=1 \
+              origin \
+              "$BRANCH" \
+              2>/tmp/gitlab_fetch.log; then
+
+            echo "Existing GitLab branch found."
+
             git reset --soft FETCH_HEAD
-            # "<path><TAB><size>" for every blob already committed on the remote.
-            git ls-tree -r -l FETCH_HEAD \
-              | awk -F'\t' '{n=split($1,a," "); print $2"\t"a[n]}' \
-              | sort -t $'\t' -k1,1 > /tmp/gitlab_remote_sizes.txt
+
+            git ls-tree \
+              -r \
+              -l \
+              FETCH_HEAD |
+              awk -F'\t' '
+                {
+                  n=split($1,a," ");
+                  print $2 "\t" a[n]
+                }
+              ' |
+              sort -t $'\t' -k1,1 \
+              > /tmp/gitlab_remote_sizes.txt
+
           else
-            echo "No existing branch on GitLab (or first run) — starting fresh."
-            cat /tmp/gitlab_fetch.log
+
+            echo "No existing branch found."
+
+            cat /tmp/gitlab_fetch.log || true
+
           fi
 
-          # "<path><TAB><size>" for every file in the local dump.
-          find . -type f ! -path './.git/*' -printf '%P\t%s\n' \
-            | sort -t $'\t' -k1,1 > /tmp/gitlab_local_sizes.txt
 
-          # A path counts as "already done" only if it exists remotely AND the
-          # size matches exactly — missing files, or ones present with a
-          # mismatched size (e.g. a push cut off mid-object), go back on the
-          # upload list instead of being silently skipped.
-          join -t $'\t' -j 1 -o 1.1,1.2,2.2 \
-            /tmp/gitlab_local_sizes.txt /tmp/gitlab_remote_sizes.txt \
+          # ========================================================
+          # LOCAL FILE LIST
+          # ========================================================
+
+          find . \
+            -type f \
+            ! -path './.git/*' \
+            -printf '%P\t%s\n' |
+            sort -t $'\t' -k1,1 \
+            > /tmp/gitlab_local_sizes.txt
+
+
+          # ========================================================
+          # COMPARE LOCAL / REMOTE
+          # ========================================================
+
+          join \
+            -t $'\t' \
+            -j 1 \
+            -o 1.1,1.2,2.2 \
+            /tmp/gitlab_local_sizes.txt \
+            /tmp/gitlab_remote_sizes.txt \
             > /tmp/gitlab_joined.txt
-          awk -F'\t' '$2==$3 {print $1}' /tmp/gitlab_joined.txt \
-            | sort > /tmp/gitlab_confirmed_done.txt
-          cut -f1 /tmp/gitlab_local_sizes.txt | sort > /tmp/gitlab_local_files.txt
-          comm -23 /tmp/gitlab_local_files.txt /tmp/gitlab_confirmed_done.txt > /tmp/gitlab_filelist.txt
-          TOTAL_FILES=$(wc -l < /tmp/gitlab_filelist.txt)
-          ALREADY_ON_REMOTE=$(wc -l < /tmp/gitlab_confirmed_done.txt)
-          echo "Already on GitLab: $ALREADY_ON_REMOTE | Remaining to push: $TOTAL_FILES"
+
+
+          awk -F'\t' \
+            '$2==$3 {print $1}' \
+            /tmp/gitlab_joined.txt |
+            sort \
+            > /tmp/gitlab_confirmed_done.txt
+
+
+          cut -f1 \
+            /tmp/gitlab_local_sizes.txt |
+            sort \
+            > /tmp/gitlab_local_files.txt
+
+
+          comm -23 \
+            /tmp/gitlab_local_files.txt \
+            /tmp/gitlab_confirmed_done.txt \
+            > /tmp/gitlab_filelist.txt
+
+
+          TOTAL_FILES=$(wc -l \
+            < /tmp/gitlab_filelist.txt)
+
+          ALREADY_ON_REMOTE=$(wc -l \
+            < /tmp/gitlab_confirmed_done.txt)
+
+
+          echo ""
+          echo "=========================================="
+          echo " GitLab Upload Status"
+          echo "=========================================="
+          echo "Already uploaded : $ALREADY_ON_REMOTE"
+          echo "Remaining        : $TOTAL_FILES"
+          echo "=========================================="
+
 
           if [ "$TOTAL_FILES" -eq 0 ]; then
-            echo "Nothing to push — GitLab already has the full dump."
-          else
-            BATCH_SIZE=150
-            BATCH_NUM=0
-            TIMESTAMP="$(date -u '+%Y-%m-%d %H:%M UTC')"
 
-            rm -f /tmp/gitlab_batch_*
-            split -l $BATCH_SIZE /tmp/gitlab_filelist.txt /tmp/gitlab_batch_
+            echo "Nothing to push."
 
-            PUSHED_COUNT=0
+            exit 0
 
-            for batch_file in /tmp/gitlab_batch_*; do
-              BATCH_NUM=$((BATCH_NUM + 1))
-              echo "=== Batch $BATCH_NUM: $batch_file ==="
+          fi
 
-              git reset HEAD . 2>/dev/null || true
-              git add --pathspec-from-file="$batch_file" 2>/dev/null || true
 
-              git commit -m "dump: $BRANCH batch $BATCH_NUM [$TIMESTAMP]" || true
+          # ========================================================
+          # BATCH UPLOAD
+          # ========================================================
 
-              ok=false
-              for i in 1 2 3; do
-                if git push origin "$BRANCH"; then
-                  ok=true
-                  break
-                fi
-                echo "GitLab push attempt $i failed for batch $BATCH_NUM — someone else moved the ref, re-syncing..."
-                if git fetch origin "$BRANCH" 2>/dev/null; then
-                  # Move onto the new tip but keep our batch's changes staged,
-                  # then recommit on top of it before trying the push again.
-                  git reset --soft FETCH_HEAD
-                  git add --pathspec-from-file="$batch_file" 2>/dev/null || true
-                  git commit -m "dump: $BRANCH batch $BATCH_NUM [$TIMESTAMP]" || true
-                fi
-                sleep 5
-              done
-              if [ "$ok" != "true" ]; then
-                echo "ERROR: GitLab upload failed at batch $BATCH_NUM after 3 a
+          BATCH_SIZE=150
+
+          BATCH_NUM=0
+
+          TIMESTAMP="$(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          rm -f /tmp/gitlab_batch_*
+
+          split \
+            -l "$BATCH_SIZE" \
+            /tmp/gitlab_filelist.txt \
+            /tmp/gitlab_batch_
+
+
+          for batch_file in /tmp/gitlab_batch_*; do
+
+            BATCH_NUM=$((BATCH_NUM + 1))
+
+            echo ""
+            echo "=========================================="
+            echo " GitLab Batch $BATCH_NUM"
+            echo "=========================================="
+
+
+            git reset HEAD . \
+              2>/dev/null || true
+
+
+            git add \
+              --pathspec-from-file="$batch_file" \
+              2>/dev/null || true
+
+
+            git commit \
+              -m "dump: $BRANCH batch $BATCH_NUM [$TIMESTAMP]" \
+              || true
+
+
+            ok=false
+
+
+            for i in 1 2 3; do
+
+              echo "Push attempt $i..."
+
+              if git push origin "$BRANCH"; then
+
+                ok=true
+
+                echo "Batch $BATCH_NUM uploaded."
+
+                break
+
+              fi
+
+
+              echo "Push failed."
+
+              if git fetch \
+                  origin \
+                  "$BRANCH" \
+                  2>/dev/null; then
+
+                git reset --soft FETCH_HEAD
+
+                git add \
+                  --pathspec-from-file="$batch_file" \
+                  2>/dev/null || true
+
+                git commit \
+                  -m "dump: $BRANCH batch $BATCH_NUM [$TIMESTAMP]" \
+                  || true
+
+              fi
+
+              sleep 5
+
+            done
+
+
+            if [ "$ok" != "true" ]; then
+
+              echo ""
+              echo "ERROR: GitLab upload failed."
+
+              echo "Failed at batch $BATCH_NUM"
+
+              exit 1
+
+            fi
+
+          done
+
+
+          echo ""
+          echo "=========================================="
+          echo " GitLab upload completed successfully"
+          echo "=========================================="
+
+          echo "Repository:"
+          echo "https://gitlab.com/$EXPECTED_PATH"
+
+          echo ""
+          echo "Branch:"
+          echo "$BRANCH"
+
+          echo ""
+          echo "Project ID:"
+          echo "$PROJECT_ID"
+
+
+      # ============================================================
+      # GITLAB DISABLED
+      # ============================================================
+
+      - name: GitLab upload disabled
+        if: inputs.upload_gitlab != 'true'
+        run: |
+          echo "GitLab upload disabled."
+
+
+      # ============================================================
+      # GITEA / CODEBERG
+      # ============================================================
+
+      - name: Gitea upload disabled
+        if: inputs.upload_gitea != 'true'
+        run: |
+          echo "Gitea/Codeberg upload disabled."
+
+
+      # ============================================================
+      # SOURCEFORGE
+      # ============================================================
+
+      - name: SourceForge upload disabled
+        if: inputs.upload_sourceforge != 'true'
+        run: |
+          echo "SourceForge upload disabled."
+
+
+      # ============================================================
+      # CLOUDFLARE R2
+      # ============================================================
+
+      - name: Cloudflare R2 upload disabled
+        if: inputs.upload_r2 != 'true'
+        run: |
+          echo "Cloudflare R2 upload disabled."
